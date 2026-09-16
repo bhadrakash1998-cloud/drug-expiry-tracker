@@ -79,19 +79,20 @@ def parse_date(date_str):
     return clean_str
 
 def extract_drug_data_from_pdf(pdf_file):
-    """Tuned parser for DVDMS (Drugs & Vaccine Distribution Management System) PDF Vouchers."""
+    """Robust parser across all pages for DVDMS / e-Aushadhi PDF Vouchers."""
     extracted_items = []
     
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                if not table or len(table) < 2:
+                if not table or len(table) < 1:
                     continue
                 
                 header_idx = -1
                 col_map = {"name": -1, "batch": -1, "expiry": -1, "qty": -1}
                 
+                # Dynamic header discovery per page/table
                 for idx, row in enumerate(table[:6]):
                     row_text = [str(cell).lower().replace('\n', ' ') if cell else '' for cell in row]
                     joined_row = " ".join(row_text)
@@ -282,18 +283,21 @@ with tab3:
             use_container_width=True
         )
         
-        # Excel Export
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df_inv.to_excel(writer, index=False, sheet_name='Stock Ledger')
-        excel_data = buffer.getvalue()
-        
-        col2.download_button(
-            label="📊 Download Inventory as Excel (.xlsx)",
-            data=excel_data,
-            file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        # Excel Export Safe Handling
+        try:
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                df_inv.to_excel(writer, index=False, sheet_name='Stock Ledger')
+            excel_data = buffer.getvalue()
+            
+            col2.download_button(
+                label="📊 Download Inventory as Excel (.xlsx)",
+                data=excel_data,
+                file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+        except Exception:
+            col2.info("Install openpyxl in requirements.txt to enable Excel downloads.")
     else:
         st.info("Database is empty.")
