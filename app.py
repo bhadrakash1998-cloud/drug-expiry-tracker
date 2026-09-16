@@ -7,12 +7,12 @@ import calendar
 from sqlalchemy import create_engine, text
 
 # ---------------------------------------------------------
-# DATABASE SETUP (SQLAlchemy for PostgreSQL & SQLite)
+# DATABASE SETUP (SQLAlchemy for Supabase / PostgreSQL)
 # ---------------------------------------------------------
-# Uses your online Cloud DB if running on Streamlit Cloud,
-# otherwise falls back to local inventory.db when running on your PC
 if "postgres" in st.secrets:
     db_url = st.secrets["postgres"]["url"]
+elif "postgres_url" in st.secrets:
+    db_url = st.secrets["postgres_url"]
 else:
     db_url = "sqlite:///inventory.db"
 
@@ -43,11 +43,11 @@ def save_items_to_db(voucher_id, items):
                 VALUES (:voucher_id, :drug_name, :batch_no, :mfg_date, :expiry_date, :quantity, :upload_date)
             '''), {
                 'voucher_id': voucher_id,
-                'drug_name': item['drug_name'],
-                'batch_no': item['batch_no'],
-                'mfg_date': item['mfg_date'],
-                'expiry_date': item['expiry_date'],
-                'quantity': item['quantity'],
+                'drug_name': str(item.get('drug_name', 'Unknown')),
+                'batch_no': str(item.get('batch_no', 'N/A')),
+                'mfg_date': str(item.get('mfg_date', 'N/A')),
+                'expiry_date': str(item.get('expiry_date', 'N/A')),
+                'quantity': int(item.get('quantity', 0)) if str(item.get('quantity', '')).isdigit() else 0,
                 'upload_date': upload_date
             })
         conn.commit()
@@ -58,22 +58,27 @@ def fetch_inventory():
     return df
 
 # ---------------------------------------------------------
-# PDF EXTRACTION ENGINE
+# CMS / e-AUSHADHI PDF EXTRACTION ENGINE
 # ---------------------------------------------------------
 def parse_date(date_str):
-    formats = ["%d/%m/%Y", "%d-%m-%Y", "%m/%Y", "%m-%Y", "%Y-%m-%d"]
+    """Normalizes dates to standard YYYY-MM-DD format."""
+    if not date_str or date_str == "N/A":
+        return "N/A"
+    formats = ["%d/%m/%Y", "%d-%m-%Y", "%m/%Y", "%m-%Y", "%Y-%m-%d", "%b-%Y", "%b/%Y"]
+    clean_str = date_str.strip()
     for fmt in formats:
         try:
-            dt = datetime.strptime(date_str.strip(), fmt)
-            if fmt in ["%m/%Y", "%m-%Y"]:
+            dt = datetime.strptime(clean_str, fmt)
+            if fmt in ["%m/%Y", "%m-%Y", "%b-%Y", "%b/%Y"]:
                 _, last_day = calendar.monthrange(dt.year, dt.month)
                 dt = dt.replace(day=last_day)
             return dt.strftime("%Y-%m-%d")
         except ValueError:
             continue
-    return date_str
+    return clean_str
 
 def extract_drug_data_from_pdf(pdf_file):
+    """Extracts stock table rows matching CHC Diglipur / e-Aushadhi PDF layout."""
     extracted_items = []
     
     with pdfplumber.open(pdf_file) as pdf:
@@ -81,34 +86,41 @@ def extract_drug_data_from_pdf(pdf_file):
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
-                    clean_row = [str(cell).strip() for cell in row if cell is not None]
+                    # Clean out None values and empty cells
+                    clean_row = [str(cell).strip().replace('\n', ' ') for cell in row if cell is not None and str(cell).strip() != '']
+                    
+                    # Ignore table header rows
+                    row_text = " ".join(clean_row).lower()
+                    if "drug/item name" in row_text or "health facility" in row_text or "qty. in hand" in row_text:
+                        continue
+                        
+                    # Target 7-column or 5+ column e-Aushadhi layouts
                     if len(clean_row) >= 4:
-                        dates = [c for c in clean_row if re.search(r'\b\d{1,2}[/-]\d{2,4}\b', c)]
-                        if len(dates) >= 1:
+                        # Find potential expiry date in the row
+                        date_matches = [c for c in clean_row if re.search(r'\b(\d{1,2}[/-]\d{2,4}|\d{2,4}[/-]\d{1,2}|[A-Za-z]{3}[/-]\d{2,4})\b', c)]
+                        
+                        drug_name = clean_row[0]
+                        batch_no = clean_row[1] if len(clean_row) > 1 else "N/A"
+                        
+                        # Extract quantity (typically Column 5 or near end)
+                        qty = 0
+                        for cell in reversed(clean_row):
+                            clean_qty = re.sub(r'[^\d]', '', cell)
+                            if clean_qty.isdigit() and len(clean_qty) <= 6:
+                                qty = int(clean_qty)
+                                break
+                                
+                        exp_date = parse_date(date_matches[-1]) if date_matches else "N/A"
+                        
+                        if drug_name and drug_name.lower() != "none":
                             extracted_items.append({
-                                "drug_name": clean_row[0] if len(clean_row) > 0 else "Unknown Drug",
-                                "batch_no": clean_row[1] if len(clean_row) > 1 else "N/A",
-                                "mfg_date": parse_date(dates[0]) if len(dates) > 1 else "N/A",
-                                "expiry_date": parse_date(dates[-1]),
-                                "quantity": int(clean_row[-1]) if clean_row[-1].isdigit() else 100
-                            })
-            
-            if not extracted_items:
-                text_content = page.extract_text()
-                if text_content:
-                    lines = text_content.split('\n')
-                    for line in lines:
-                        match = re.search(r'(?P<name>[A-Za-z0-9\s]+)\s+(?P<batch>[A-Z0-9\-\/]+)\s+(?P<exp>\d{1,2}[/-]\d{2,4})\s+(?P<qty>\d+)', line)
-                        if match:
-                            gd = match.groupdict()
-                            extracted_items.append({
-                                "drug_name": gd['name'].strip(),
-                                "batch_no": gd['batch'].strip(),
+                                "drug_name": drug_name,
+                                "batch_no": batch_no,
                                 "mfg_date": "N/A",
-                                "expiry_date": parse_date(gd['exp']),
-                                "quantity": int(gd['qty'])
+                                "expiry_date": exp_date,
+                                "quantity": qty
                             })
-                            
+
     return extracted_items
 
 # ---------------------------------------------------------
@@ -119,7 +131,7 @@ st.set_page_config(page_title="CMS Drug Expiry Tracker", layout="wide", page_ico
 init_db()
 
 st.title("💊 Central Medical Store - Drug Expiry Tracker")
-st.markdown("Upload voucher copy PDFs to track stock batches and monitor impending drug expiries.")
+st.markdown("Upload voucher copy PDFs to track stock batches and monitor impending drug expiries across all devices.")
 
 st.sidebar.header("⚙️ Settings & Alert Rules")
 warning_days = st.sidebar.slider("Warning Threshold (Days)", min_value=30, max_value=180, value=90, step=15)
@@ -127,30 +139,44 @@ critical_days = st.sidebar.slider("Critical Threshold (Days)", min_value=7, max_
 
 tab1, tab2, tab3 = st.tabs(["📤 Upload Voucher PDF", "⚠️ Expiry Alerts & Status", "📦 Full Inventory Records"])
 
+# --- TAB 1: UPLOAD & EDIT ---
 with tab1:
-    st.subheader("Upload Central Medical Store Voucher")
+    st.subheader("Upload Central Medical Store Voucher / Report")
     uploaded_file = st.file_uploader("Select a PDF voucher file", type=["pdf"])
     
+    parsed_data = []
     if uploaded_file is not None:
         st.info("Parsing PDF content...")
         parsed_data = extract_drug_data_from_pdf(uploaded_file)
-        
         if parsed_data:
-            st.success(f"Successfully extracted {len(parsed_data)} items from voucher.")
-            df_preview = pd.DataFrame(parsed_data)
-            
-            st.write("### Extracted Items Preview")
-            edited_df = st.data_editor(df_preview, num_rows="dynamic")
-            
-            voucher_ref = st.text_input("Enter Voucher / Invoice Reference No.", value=f"VOUCHER-{datetime.now().strftime('%Y%m%d%H%M')}")
-            
-            if st.button("Save Voucher to Inventory Database"):
-                save_items_to_db(voucher_ref, edited_df.to_dict('records'))
-                st.success("Voucher items stored in database successfully!")
-                st.rerun()
+            st.success(f"Successfully extracted {len(parsed_data)} items from PDF.")
         else:
-            st.warning("Could not automatically parse structured batch data. Check if the PDF is scannable or text-based.")
+            st.warning("Could not auto-extract table rows. If this is a scanned image PDF, you can review or enter items below.")
 
+    st.divider()
+    st.write("### 📝 Batch Items Ledger Entry")
+    st.caption("Review extracted items or manually edit stock rows below before saving to cloud database.")
+    
+    initial_data = parsed_data if parsed_data else [{
+        "drug_name": "Paracetamol 500mg", 
+        "batch_no": "B1234", 
+        "mfg_date": "N/A", 
+        "expiry_date": "2027-12-31", 
+        "quantity": 1000
+    }]
+    
+    edited_df = st.data_editor(pd.DataFrame(initial_data), num_rows="dynamic", use_container_width=True)
+    voucher_ref = st.text_input("Voucher / Invoice Reference No.", value=f"CHC-DIGLIPUR-{datetime.now().strftime('%Y%m%d%H%M')}")
+    
+    if st.button("💾 Save Stock to Central Database", type="primary"):
+        if not edited_df.empty:
+            save_items_to_db(voucher_ref, edited_df.to_dict('records'))
+            st.success("All items successfully saved to Supabase database!")
+            st.rerun()
+        else:
+            st.error("Please add at least one valid drug item row before saving.")
+
+# --- TAB 2: ALERTS ---
 with tab2:
     st.subheader("Impending Expiry Dashboard")
     df_inv = fetch_inventory()
@@ -201,8 +227,9 @@ with tab2:
         else:
             st.success("No items are currently approaching expiry within your set threshold.")
     else:
-        st.info("No records found. Upload a PDF voucher in Tab 1 to get started.")
+        st.info("No records found in database. Upload a PDF voucher in Tab 1 to get started.")
 
+# --- TAB 3: FULL LEDGER ---
 with tab3:
     st.subheader("Complete Stock & Batch Ledger")
     df_inv = fetch_inventory()
