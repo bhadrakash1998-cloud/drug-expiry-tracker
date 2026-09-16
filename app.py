@@ -2,47 +2,59 @@ import streamlit as st
 import pdfplumber
 import re
 import pandas as pd
-import sqlite3
 from datetime import datetime, date
 import calendar
+from sqlalchemy import create_engine, text
 
 # ---------------------------------------------------------
-# DATABASE SETUP
+# DATABASE SETUP (SQLAlchemy for PostgreSQL & SQLite)
 # ---------------------------------------------------------
+# Uses your online Cloud DB if running on Streamlit Cloud,
+# otherwise falls back to local inventory.db when running on your PC
+if "postgres" in st.secrets:
+    db_url = st.secrets["postgres"]["url"]
+else:
+    db_url = "sqlite:///inventory.db"
+
+engine = create_engine(db_url)
+
 def init_db():
-    conn = sqlite3.connect("inventory.db")
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            voucher_id TEXT,
-            drug_name TEXT,
-            batch_no TEXT,
-            mfg_date TEXT,
-            expiry_date TEXT,
-            quantity INTEGER,
-            upload_date TEXT
-        )
-    ''')
-    conn.commit()
-    conn.close()
+    with engine.connect() as conn:
+        conn.execute(text('''
+            CREATE TABLE IF NOT EXISTS inventory (
+                id SERIAL PRIMARY KEY,
+                voucher_id TEXT,
+                drug_name TEXT,
+                batch_no TEXT,
+                mfg_date TEXT,
+                expiry_date TEXT,
+                quantity INTEGER,
+                upload_date TEXT
+            )
+        '''))
+        conn.commit()
 
 def save_items_to_db(voucher_id, items):
-    conn = sqlite3.connect("inventory.db")
-    c = conn.cursor()
     upload_date = date.today().isoformat()
-    for item in items:
-        c.execute('''
-            INSERT INTO inventory (voucher_id, drug_name, batch_no, mfg_date, expiry_date, quantity, upload_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        ''', (voucher_id, item['drug_name'], item['batch_no'], item['mfg_date'], item['expiry_date'], item['quantity'], upload_date))
-    conn.commit()
-    conn.close()
+    with engine.connect() as conn:
+        for item in items:
+            conn.execute(text('''
+                INSERT INTO inventory (voucher_id, drug_name, batch_no, mfg_date, expiry_date, quantity, upload_date)
+                VALUES (:voucher_id, :drug_name, :batch_no, :mfg_date, :expiry_date, :quantity, :upload_date)
+            '''), {
+                'voucher_id': voucher_id,
+                'drug_name': item['drug_name'],
+                'batch_no': item['batch_no'],
+                'mfg_date': item['mfg_date'],
+                'expiry_date': item['expiry_date'],
+                'quantity': item['quantity'],
+                'upload_date': upload_date
+            })
+        conn.commit()
 
 def fetch_inventory():
-    conn = sqlite3.connect("inventory.db")
-    df = pd.read_sql_query("SELECT * FROM inventory", conn)
-    conn.close()
+    with engine.connect() as conn:
+        df = pd.read_sql_query(text("SELECT * FROM inventory"), conn)
     return df
 
 # ---------------------------------------------------------
@@ -82,9 +94,9 @@ def extract_drug_data_from_pdf(pdf_file):
                             })
             
             if not extracted_items:
-                text = page.extract_text()
-                if text:
-                    lines = text.split('\n')
+                text_content = page.extract_text()
+                if text_content:
+                    lines = text_content.split('\n')
                     for line in lines:
                         match = re.search(r'(?P<name>[A-Za-z0-9\s]+)\s+(?P<batch>[A-Z0-9\-\/]+)\s+(?P<exp>\d{1,2}[/-]\d{2,4})\s+(?P<qty>\d+)', line)
                         if match:
