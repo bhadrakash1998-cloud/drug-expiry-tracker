@@ -233,11 +233,11 @@ def extract_drug_data_from_pdf(pdf_file):
 # ---------------------------------------------------------
 # STREAMLIT UI
 # ---------------------------------------------------------
-st.set_page_config(page_title="CMS Drug Expiry Tracker", layout="wide", page_icon="💊")
+st.set_page_config(page_title="Pharmacy Store SDH Diglipur", layout="wide", page_icon="💊")
 
 init_db()
 
-st.title("💊 Central Medical Store - Drug Inventory & Issue Tracker")
+st.title("💊 Pharmacy Store Sub-District Hospital Diglipur")
 st.markdown("Upload **Receipt Vouchers** to add stock or **Issue Vouchers** to automatically deduct batch stock issued to hospital departments.")
 
 st.sidebar.header("⚙️ Settings & Alert Rules")
@@ -248,7 +248,7 @@ tab1, tab2, tab3 = st.tabs(["📤 Upload Voucher PDF (Receipt / Issue)", "⚠️
 
 # --- TAB 1: UPLOAD & EDIT (RECEIPT & ISSUE) ---
 with tab1:
-    st.subheader("Voucher Management Engine")
+    st.subheader("Voucher Management Engine - SDH Diglipur")
     
     voucher_type = st.radio(
         "Select Voucher Operation Type:",
@@ -287,7 +287,7 @@ with tab1:
     }]
     
     edited_df = st.data_editor(pd.DataFrame(initial_data), num_rows="dynamic", use_container_width=True)
-    voucher_ref = st.text_input("Voucher / Issue Slip Reference No.", value=f"VOUCHER-{datetime.now().strftime('%Y%m%d%H%M')}")
+    voucher_ref = st.text_input("Voucher / Issue Slip Reference No.", value=f"SDH-DIGLIPUR-{datetime.now().strftime('%Y%m%d%H%M')}")
     
     if is_issue_mode:
         if st.button("📤 Deduct Issued Stock from Inventory", type="primary"):
@@ -410,7 +410,7 @@ with tab3:
             st.download_button(
                 label="📄 Download Filtered Inventory as CSV",
                 data=csv_data,
-                file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.csv",
+                file_name=f"sdh_diglipur_stock_{datetime.now().strftime('%Y%m%d')}.csv",
                 mime="text/csv",
                 use_container_width=True
             )
@@ -424,7 +424,7 @@ with tab3:
                 st.download_button(
                     label="📊 Download Filtered Inventory as Excel (.xlsx)",
                     data=excel_data,
-                    file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    file_name=f"sdh_diglipur_stock_{datetime.now().strftime('%Y%m%d')}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
