@@ -53,9 +53,14 @@ def save_items_to_db(voucher_id, items):
             })
         conn.commit()
 
+def delete_item_by_id(item_id):
+    with engine.connect() as conn:
+        conn.execute(text("DELETE FROM inventory WHERE id = :id"), {"id": item_id})
+        conn.commit()
+
 def fetch_inventory():
     with engine.connect() as conn:
-        df = pd.read_sql_query(text("SELECT * FROM inventory"), conn)
+        df = pd.read_sql_query(text("SELECT * FROM inventory ORDER BY id DESC"), conn)
     return df
 
 # ---------------------------------------------------------
@@ -252,7 +257,7 @@ with tab2:
                     return 'background-color: #ffe082; color: black;'
                 return ''
 
-            display_cols = ['drug_name', 'batch_no', 'quantity', 'mfg_date', 'expiry_date', 'days_until_expiry', 'status', 'voucher_id']
+            display_cols = ['id', 'drug_name', 'batch_no', 'quantity', 'mfg_date', 'expiry_date', 'days_until_expiry', 'status', 'voucher_id']
             st.dataframe(
                 alerts_df[display_cols].style.map(highlight_expiry, subset=['status']),
                 use_container_width=True
@@ -262,7 +267,7 @@ with tab2:
     else:
         st.info("No records found in database. Upload a PDF voucher in Tab 1 to get started.")
 
-# --- TAB 3: FULL LEDGER & EXPORT ---
+# --- TAB 3: FULL LEDGER, EXPORT & DELETE ---
 with tab3:
     st.subheader("Complete Stock & Batch Ledger")
     df_inv = fetch_inventory()
@@ -270,34 +275,54 @@ with tab3:
         st.dataframe(df_inv, use_container_width=True)
         
         st.divider()
-        st.subheader("📥 Export Reports")
-        col1, col2 = st.columns(2)
+        col_exp, col_del = st.columns(2)
         
-        # CSV Export
-        csv_data = df_inv.to_csv(index=False).encode('utf-8')
-        col1.download_button(
-            label="📄 Download Inventory as CSV",
-            data=csv_data,
-            file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-        
-        # Excel Export Safe Handling
-        try:
-            buffer = io.BytesIO()
-            with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                df_inv.to_excel(writer, index=False, sheet_name='Stock Ledger')
-            excel_data = buffer.getvalue()
-            
-            col2.download_button(
-                label="📊 Download Inventory as Excel (.xlsx)",
-                data=excel_data,
-                file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        # EXPORT SECTION
+        with col_exp:
+            st.subheader("📥 Export Reports")
+            csv_data = df_inv.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📄 Download Inventory as CSV",
+                data=csv_data,
+                file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.csv",
+                mime="text/csv",
                 use_container_width=True
             )
-        except Exception:
-            col2.info("Install openpyxl in requirements.txt to enable Excel downloads.")
+            
+            try:
+                buffer = io.BytesIO()
+                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                    df_inv.to_excel(writer, index=False, sheet_name='Stock Ledger')
+                excel_data = buffer.getvalue()
+                
+                st.download_button(
+                    label="📊 Download Inventory as Excel (.xlsx)",
+                    data=excel_data,
+                    file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            except Exception:
+                st.info("Install openpyxl in requirements.txt to enable Excel downloads.")
+
+        # DELETE SECTION
+        with col_del:
+            st.subheader("🗑️ Delete Inventory Record")
+            st.caption("Select a specific duplicate or incorrect drug batch to permanently remove it from Supabase.")
+            
+            # Create dropdown options formatted as: "ID 12 | Paracetamol 500mg | Batch: B1234"
+            item_options = {
+                f"ID {row['id']} | {row['drug_name']} (Batch: {row['batch_no']}, Qty: {row['quantity']})": row['id']
+                for _, row in df_inv.iterrows()
+            }
+            
+            selected_label = st.selectbox("Select drug batch to delete:", options=list(item_options.keys()))
+            selected_id = item_options[selected_label]
+            
+            if st.button("🗑️ Delete Selected Batch", type="secondary"):
+                delete_item_by_id(selected_id)
+                st.success(f"Successfully deleted Record ID {selected_id} from database!")
+                st.rerun()
+
     else:
         st.info("Database is empty.")
