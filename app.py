@@ -5,6 +5,7 @@ import pandas as pd
 from datetime import datetime, date
 import calendar
 from sqlalchemy import create_engine, text
+import io
 
 # ---------------------------------------------------------
 # DATABASE SETUP (SQLAlchemy for Supabase / PostgreSQL)
@@ -58,7 +59,7 @@ def fetch_inventory():
     return df
 
 # ---------------------------------------------------------
-# CMS / e-AUSHADHI PDF EXTRACTION ENGINE
+# DVDMS / e-AUSHADHI PDF EXTRACTION ENGINE
 # ---------------------------------------------------------
 def parse_date(date_str):
     """Normalizes dates to standard YYYY-MM-DD format."""
@@ -78,48 +79,79 @@ def parse_date(date_str):
     return clean_str
 
 def extract_drug_data_from_pdf(pdf_file):
-    """Extracts stock table rows matching CHC Diglipur / e-Aushadhi PDF layout."""
+    """Tuned parser for DVDMS (Drugs & Vaccine Distribution Management System) PDF Vouchers."""
     extracted_items = []
     
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                for row in table:
-                    # Clean out None values and empty cells
-                    clean_row = [str(cell).strip().replace('\n', ' ') for cell in row if cell is not None and str(cell).strip() != '']
+                if not table or len(table) < 2:
+                    continue
+                
+                header_idx = -1
+                col_map = {"name": -1, "batch": -1, "expiry": -1, "qty": -1}
+                
+                for idx, row in enumerate(table[:6]):
+                    row_text = [str(cell).lower().replace('\n', ' ') if cell else '' for cell in row]
+                    joined_row = " ".join(row_text)
                     
-                    # Ignore table header rows
-                    row_text = " ".join(clean_row).lower()
-                    if "drug/item name" in row_text or "health facility" in row_text or "qty. in hand" in row_text:
+                    if any(k in joined_row for k in ["item name", "drug name", "batch", "exp", "issued", "qty"]):
+                        header_idx = idx
+                        for c_i, cell in enumerate(row_text):
+                            if any(k in cell for k in ["item name", "drug name", "drug/item", "item code", "particular"]):
+                                col_map["name"] = c_i
+                            elif "batch" in cell:
+                                col_map["batch"] = c_i
+                            elif any(k in cell for k in ["exp", "expiry"]):
+                                col_map["expiry"] = c_i
+                            elif any(k in cell for k in ["issued", "qty", "quantity", "rec", "in hand", "dispatched"]):
+                                col_map["qty"] = c_i
+                        break
+                
+                start_row = header_idx + 1 if header_idx != -1 else 0
+                for row in table[start_row:]:
+                    clean_row = [str(cell).strip().replace('\n', ' ') if cell else '' for cell in row]
+                    joined_line = " ".join(clean_row).lower()
+                    
+                    if not any(clean_row) or "item name" in joined_line or "total" in joined_line or "page" in joined_line:
                         continue
-                        
-                    # Target 7-column or 5+ column e-Aushadhi layouts
-                    if len(clean_row) >= 4:
-                        # Find potential expiry date in the row
+
+                    drug_name = clean_row[col_map["name"]] if col_map["name"] != -1 and col_map["name"] < len(clean_row) else clean_row[0]
+                    drug_name = re.sub(r'^\d+[\.\)]\s*', '', drug_name)
+                    
+                    batch_no = clean_row[col_map["batch"]] if col_map["batch"] != -1 and col_map["batch"] < len(clean_row) else "N/A"
+                    if not batch_no or batch_no == "":
+                        batch_no = "N/A"
+
+                    exp_date = "N/A"
+                    if col_map["expiry"] != -1 and col_map["expiry"] < len(clean_row):
+                        exp_date = parse_date(clean_row[col_map["expiry"]])
+                    
+                    if exp_date == "N/A":
                         date_matches = [c for c in clean_row if re.search(r'\b(\d{1,2}[/-]\d{2,4}|\d{2,4}[/-]\d{1,2}|[A-Za-z]{3}[/-]\d{2,4})\b', c)]
-                        
-                        drug_name = clean_row[0]
-                        batch_no = clean_row[1] if len(clean_row) > 1 else "N/A"
-                        
-                        # Extract quantity (typically Column 5 or near end)
-                        qty = 0
+                        if date_matches:
+                            exp_date = parse_date(date_matches[-1])
+
+                    qty = 0
+                    if col_map["qty"] != -1 and col_map["qty"] < len(clean_row):
+                        clean_qty = re.sub(r'[^\d]', '', clean_row[col_map["qty"]])
+                        qty = int(clean_qty) if clean_qty.isdigit() else 0
+                    else:
                         for cell in reversed(clean_row):
                             clean_qty = re.sub(r'[^\d]', '', cell)
-                            if clean_qty.isdigit() and len(clean_qty) <= 6:
+                            if clean_qty.isdigit() and 0 < len(clean_qty) <= 7:
                                 qty = int(clean_qty)
                                 break
-                                
-                        exp_date = parse_date(date_matches[-1]) if date_matches else "N/A"
-                        
-                        if drug_name and drug_name.lower() != "none":
-                            extracted_items.append({
-                                "drug_name": drug_name,
-                                "batch_no": batch_no,
-                                "mfg_date": "N/A",
-                                "expiry_date": exp_date,
-                                "quantity": qty
-                            })
+                    
+                    if drug_name and len(drug_name) > 2 and not drug_name.lower().startswith("sub total"):
+                        extracted_items.append({
+                            "drug_name": drug_name,
+                            "batch_no": batch_no,
+                            "mfg_date": "N/A",
+                            "expiry_date": exp_date,
+                            "quantity": qty
+                        })
 
     return extracted_items
 
@@ -229,11 +261,39 @@ with tab2:
     else:
         st.info("No records found in database. Upload a PDF voucher in Tab 1 to get started.")
 
-# --- TAB 3: FULL LEDGER ---
+# --- TAB 3: FULL LEDGER & EXPORT ---
 with tab3:
     st.subheader("Complete Stock & Batch Ledger")
     df_inv = fetch_inventory()
     if not df_inv.empty:
         st.dataframe(df_inv, use_container_width=True)
+        
+        st.divider()
+        st.subheader("📥 Export Reports")
+        col1, col2 = st.columns(2)
+        
+        # CSV Export
+        csv_data = df_inv.to_csv(index=False).encode('utf-8')
+        col1.download_button(
+            label="📄 Download Inventory as CSV",
+            data=csv_data,
+            file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+        # Excel Export
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_inv.to_excel(writer, index=False, sheet_name='Stock Ledger')
+        excel_data = buffer.getvalue()
+        
+        col2.download_button(
+            label="📊 Download Inventory as Excel (.xlsx)",
+            data=excel_data,
+            file_name=f"stock_ledger_{datetime.now().strftime('%Y%m%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
     else:
         st.info("Database is empty.")
