@@ -221,7 +221,7 @@ with tab2:
 
             display_cols = ['drug_name', 'batch_no', 'quantity', 'mfg_date', 'expiry_date', 'days_until_expiry', 'status', 'voucher_id']
             st.dataframe(
-                alerts_df[display_cols].style.applymap(highlight_expiry, subset=['status']),
+                alerts_df[display_cols].style.map(highlight_expiry, subset=['status']),
                 use_container_width=True
             )
         else:
